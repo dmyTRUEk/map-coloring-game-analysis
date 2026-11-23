@@ -12,9 +12,12 @@ use rayon::prelude::*;
 use Colors::*;
 use Outcome::{Draw, Loss, Win};
 
+
+
 // Exact search cost can grow exponentially with NUM_POINTS.
 const NUM_GAMES: usize = 1000;
-const NUM_POINTS: usize = 12;
+const NUM_POINTS: usize = 7;
+
 // None chooses a random seed once per run. Some(42) replays a batch of maps.
 // Each game uses its index together with this seed to generate its sites.
 const MAP_SEED: Option<u64> = None;
@@ -32,11 +35,19 @@ enum Colors {
 
 // One palette per player, in turn order. Player 1 opens every game.
 const AVAILABLE_COLORS: &[&[Colors]] = &[
-	// &[Red, Yellow, Green, Blue],
+	&[Red, Yellow, Green, Blue],
+	&[Red, Yellow, Green, Blue],
 	// &[Red, Yellow, Green, Blue],
 
-	&[Red, Yellow],
-	&[Green, Blue],
+	// &[Red, Yellow],
+	// &[Green, Blue],
+
+	// &[Red, Green, Blue],
+	// &[Red, Green, Yellow],
+
+	// &[Yellow, Red],
+	// &[Yellow, Green],
+	// &[Yellow, Blue],
 ];
 
 const NUM_PLAYERS: usize = AVAILABLE_COLORS.len();
@@ -46,12 +57,18 @@ const NUM_PLAYERS: usize = AVAILABLE_COLORS.len();
 // ON_NO_MOVE uses the row of the player unable to move on an incomplete map.
 // by_actor assigns its first outcome to that player and its second to the others.
 type OutcomeTable = [[Outcome; NUM_PLAYERS]; NUM_PLAYERS];
-const ON_FULL_MAP: OutcomeTable = by_actor(Win, Loss);
-const ON_NO_MOVE: OutcomeTable = by_actor(Loss, Win);
-// For a draw on completion, set ON_FULL_MAP to by_actor(Draw, Draw).
+
 // To give player 2 every completion in a two-player game, use [[Loss, Win]; 2].
 // With three players, award a win only to the one who blocked the next player
 // by setting ON_NO_MOVE to [[Loss, Loss, Win], [Win, Loss, Loss], [Loss, Win, Loss]].
+
+// const ON_FULL_MAP: OutcomeTable = by_actor(Win, Loss);
+const ON_FULL_MAP: OutcomeTable = by_actor(Draw, Draw); // draw on completion
+
+const ON_NO_MOVE: OutcomeTable = by_actor(Loss, Win); // for 2 players
+// const ON_NO_MOVE: OutcomeTable = [[Loss, Loss, Win], [Win, Loss, Loss], [Loss, Win, Loss]]; // for 3 players
+
+
 
 const _: () = {
 	assert!(NUM_GAMES > 0, "at least one game is needed for percentages");
