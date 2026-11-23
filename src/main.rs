@@ -1,6 +1,9 @@
 //! Exact play on graphs of randomly generated, unbounded Voronoi maps.
 
 use std::collections::HashMap;
+use std::io::{self, IsTerminal, Write};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, StandardNormal};
@@ -11,7 +14,7 @@ use Outcome::{Draw, Loss, Win};
 
 // Exact search cost can grow exponentially with NUM_POINTS.
 const NUM_GAMES: usize = 1000;
-const NUM_POINTS: usize = 7;
+const NUM_POINTS: usize = 12;
 // None chooses a random seed once per run. Some(42) replays a batch of maps.
 // Each game uses its index together with this seed to generate its sites.
 const MAP_SEED: Option<u64> = None;
@@ -60,7 +63,8 @@ const _: () = {
 
 fn main() {
 	let seed = MAP_SEED.unwrap_or_else(rand::random);
-	let totals = analyze::<NUM_POINTS, NUM_PLAYERS>(NUM_GAMES, seed, &RULES);
+	let progress = game_progress(NUM_GAMES);
+	let totals = analyze::<NUM_POINTS, NUM_PLAYERS>(NUM_GAMES, seed, &RULES, progress);
 	println!("Solved {NUM_GAMES} games with {NUM_POINTS} cells each (map seed {seed}, part of total seed).");
 	let percent = |count| 100.0 * (count as f64) / (NUM_GAMES as f64);
 	for (i, tally) in totals.into_iter().enumerate() {
@@ -81,6 +85,7 @@ fn analyze<const N: usize, const P: usize>(
 	games: usize,
 	seed: u64,
 	rules: &Rules<P>,
+	on_game_finished: impl Fn() + Sync,
 ) -> [Tally; P] {
 	(0..games)
 		.into_par_iter()
@@ -96,6 +101,7 @@ fn analyze<const N: usize, const P: usize>(
 				for (tally, outcome) in totals.iter_mut().zip(game) {
 					tally[outcome as usize] += 1;
 				}
+				on_game_finished();
 				totals
 			},
 		)
@@ -110,6 +116,55 @@ fn analyze<const N: usize, const P: usize>(
 				left
 			},
 		)
+}
+
+fn game_progress(total: usize) -> impl Fn() + Sync {
+	let started = Instant::now();
+	let state = io::stderr().is_terminal().then(|| {
+		let _ = draw_game_progress(io::stderr().lock(), 0, total, Duration::ZERO);
+		Mutex::new((0_usize, started))
+	});
+
+	move || {
+		let Some(state) = &state else { return };
+		let mut state = state.lock().unwrap();
+		let (completed, last_draw) = &mut *state;
+		*completed += 1;
+		let now = Instant::now();
+		if *completed == total || now.duration_since(*last_draw) >= Duration::from_millis(100) {
+			*last_draw = now;
+			let _ = draw_game_progress(io::stderr().lock(), *completed, total, now - started);
+		}
+	}
+}
+
+fn draw_game_progress(
+	mut out: impl Write,
+	completed: usize,
+	total: usize,
+	elapsed: Duration,
+) -> io::Result<()> {
+	const WIDTH: usize = 20;
+	let percent = completed as u128 * 100 / total as u128;
+	let filled = percent as usize * WIDTH / 100;
+	let clock = |seconds: u64| format!("{:02}:{:02}", seconds / 60, seconds % 60);
+	let (rate, eta) = if completed == 0 || elapsed.is_zero() {
+		(0.0, String::from("--:--"))
+	} else {
+		let rate = completed as f64 / elapsed.as_secs_f64();
+		(rate, clock(((total - completed) as f64 / rate).ceil() as u64))
+	};
+	write!(
+		out,
+		"\rGames [{}{}] {percent:3}% {completed}/{total}  {rate:.1}/s  elapsed {}  ETA {eta}\x1b[K",
+		"#".repeat(filled),
+		"-".repeat(WIDTH - filled),
+		clock(elapsed.as_secs()),
+	)?;
+	if completed == total {
+		writeln!(out)?;
+	}
+	out.flush()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -514,13 +569,35 @@ mod tests {
 
 	#[test]
 	fn statistics_count_every_game_for_every_seat_including_an_immediate_block() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+
 		let mut rules = usual_rules(&[&[], &[Red], &[Blue]]);
 		rules.on_no_move[0] = [Loss, Draw, Win];
-		let totals = analyze::<3, 3>(17, 7, &rules);
+		let finished = AtomicUsize::new(0);
+		let totals = analyze::<3, 3>(17, 7, &rules, || {
+			finished.fetch_add(1, Ordering::Relaxed);
+		});
+		assert_eq!(finished.into_inner(), 17);
 		for (tally, outcome) in totals.into_iter().zip([Loss, Draw, Win]) {
 			assert_eq!(tally[outcome as usize], 17);
 			assert_eq!(tally.iter().sum::<usize>(), 17);
 		}
+	}
+
+	#[test]
+	fn progress_redraws_one_line_and_finishes_at_one_hundred_percent() {
+		let mut output = Vec::new();
+		draw_game_progress(&mut output, 0, 10, Duration::ZERO).unwrap();
+		draw_game_progress(&mut output, 4, 10, Duration::from_secs(8)).unwrap();
+		draw_game_progress(&mut output, 10, 10, Duration::from_secs(20)).unwrap();
+		let output = String::from_utf8(output).unwrap();
+		let frames: Vec<_> = output.split_terminator('\r').skip(1).collect();
+		assert_eq!(frames.len(), 3);
+		assert!(frames[0].contains("0% 0/10") && frames[0].contains("ETA --:--"));
+		assert!(frames[1].contains("40% 4/10  0.5/s  elapsed 00:08  ETA 00:12"));
+		assert!(frames[2].contains("100% 10/10") && frames[2].contains("ETA 00:00"));
+		assert_eq!(output.lines().count(), 1);
+		assert!(output.ends_with('\n'));
 	}
 }
 
