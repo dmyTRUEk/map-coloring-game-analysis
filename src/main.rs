@@ -16,7 +16,7 @@ use Outcome::{Draw, Loss, Win};
 
 // Exact search cost can grow exponentially with NUM_POINTS.
 const NUM_GAMES: usize = 1000;
-const NUM_POINTS: usize = 7;
+const NUM_POINTS: usize = 10;
 
 // None chooses a random seed once per run. Some(42) replays a batch of maps.
 // Each game uses its index together with this seed to generate its sites.
@@ -36,7 +36,7 @@ enum Colors {
 // One palette per player, in turn order. Player 1 opens every game.
 const AVAILABLE_COLORS: &[&[Colors]] = &[
 	&[Red, Yellow, Green, Blue],
-	&[Red, Yellow, Green, Blue],
+	&[Red, Yellow],
 	// &[Red, Yellow, Green, Blue],
 
 	// &[Red, Yellow],
@@ -62,10 +62,14 @@ type OutcomeTable = [[Outcome; NUM_PLAYERS]; NUM_PLAYERS];
 // With three players, award a win only to the one who blocked the next player
 // by setting ON_NO_MOVE to [[Loss, Loss, Win], [Win, Loss, Loss], [Loss, Win, Loss]].
 
-// const ON_FULL_MAP: OutcomeTable = by_actor(Win, Loss);
-const ON_FULL_MAP: OutcomeTable = by_actor(Draw, Draw); // draw on completion
-
-const ON_NO_MOVE: OutcomeTable = by_actor(Loss, Win); // for 2 players
+// The last legal move loses, whether it fills the map or blocks the opponent.
+// With 10 sites, all four colors for P1 and red/yellow for P2, P1 won 50,350
+// of 100,000 maps (50,000 each with seeds 20_261_123 and 8_675_309).
+const ON_FULL_MAP: OutcomeTable = by_actor(Loss, Win);
+const ON_NO_MOVE: OutcomeTable = by_actor(Win, Loss);
+// const ON_FULL_MAP: OutcomeTable = by_actor(Win, Loss); // last cell wins
+// const ON_FULL_MAP: OutcomeTable = by_actor(Draw, Draw); // draw on completion
+// const ON_NO_MOVE: OutcomeTable = by_actor(Loss, Win); // blocked player loses
 // const ON_NO_MOVE: OutcomeTable = [[Loss, Loss, Win], [Win, Loss, Loss], [Loss, Win, Loss]]; // for 3 players
 
 
