@@ -5,7 +5,7 @@ use std::io::{self, IsTerminal, Write};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, StandardNormal};
 use rayon::prelude::*;
 
@@ -16,7 +16,9 @@ use Outcome::{Draw, Loss, Win};
 
 // Exact search cost can grow exponentially with NUM_POINTS.
 const NUM_GAMES: usize = 1000;
-const NUM_POINTS: usize = 10;
+// With four shared colors, ten sites favor player 2 and eleven favor player 1.
+// FiftyFifty flips a fair coin per map. Use PointCount::Fixed(10) for ten sites every time.
+const NUM_POINTS: PointCount = PointCount::FiftyFifty(10, 11);
 
 // None chooses a random seed once per run. Some(42) replays a batch of maps.
 // Each game uses its index together with this seed to generate its sites.
@@ -36,7 +38,7 @@ enum Colors {
 // One palette per player, in turn order. Player 1 opens every game.
 const AVAILABLE_COLORS: &[&[Colors]] = &[
 	&[Red, Yellow, Green, Blue],
-	&[Red, Yellow],
+	&[Red, Yellow, Green, Blue],
 	// &[Red, Yellow, Green, Blue],
 
 	// &[Red, Yellow],
@@ -62,31 +64,34 @@ type OutcomeTable = [[Outcome; NUM_PLAYERS]; NUM_PLAYERS];
 // With three players, award a win only to the one who blocked the next player
 // by setting ON_NO_MOVE to [[Loss, Loss, Win], [Win, Loss, Loss], [Loss, Win, Loss]].
 
-// The last legal move loses, whether it fills the map or blocks the opponent.
-// With 10 sites, all four colors for P1 and red/yellow for P2, P1 won 50,350
-// of 100,000 maps (50,000 each with seeds 20_261_123 and 8_675_309).
-const ON_FULL_MAP: OutcomeTable = by_actor(Loss, Win);
-const ON_NO_MOVE: OutcomeTable = by_actor(Win, Loss);
-// const ON_FULL_MAP: OutcomeTable = by_actor(Win, Loss); // last cell wins
+// The last legal move wins, whether it fills the map or blocks the opponent.
+const ON_FULL_MAP: OutcomeTable = by_actor(Win, Loss);
+const ON_NO_MOVE: OutcomeTable = by_actor(Loss, Win);
 // const ON_FULL_MAP: OutcomeTable = by_actor(Draw, Draw); // draw on completion
-// const ON_NO_MOVE: OutcomeTable = by_actor(Loss, Win); // blocked player loses
 // const ON_NO_MOVE: OutcomeTable = [[Loss, Loss, Win], [Win, Loss, Loss], [Loss, Win, Loss]]; // for 3 players
 
 
 
 const _: () = {
 	assert!(NUM_GAMES > 0, "at least one game is needed for percentages");
-	assert!(NUM_POINTS > 0, "a map needs at least one site");
+	let [a, b] = NUM_POINTS.sizes();
+	assert!(a > 0 && b > 0, "a map needs at least one site");
 	assert!(NUM_PLAYERS > 0, "at least one player must take turns");
 };
 
 
 
 fn main() {
+	const SIZES: [usize; 2] = NUM_POINTS.sizes();
 	let seed = MAP_SEED.unwrap_or_else(rand::random);
 	let progress = game_progress(NUM_GAMES);
-	let totals = analyze::<NUM_POINTS, NUM_PLAYERS>(NUM_GAMES, seed, &RULES, progress);
-	println!("Solved {NUM_GAMES} games with {NUM_POINTS} cells each (map seed {seed}, part of total seed).");
+	let totals = analyze::<{ SIZES[0] }, { SIZES[1] }, NUM_PLAYERS>(NUM_GAMES, seed, &RULES, progress);
+	let [a, b] = SIZES;
+	if a == b {
+		println!("Solved {NUM_GAMES} games with {a} cells each (map seed {seed}).");
+	} else {
+		println!("Solved {NUM_GAMES} games with {a} or {b} cells (map seed {seed}).");
+	}
 	let percent = |count| 100.0 * (count as f64) / (NUM_GAMES as f64);
 	for (i, tally) in totals.into_iter().enumerate() {
 		let [wins, losses, draws] = [Win, Loss, Draw].map(|outcome| tally[outcome as usize]);
@@ -102,7 +107,7 @@ fn main() {
 
 
 
-fn analyze<const N: usize, const P: usize>(
+fn analyze<const N: usize, const M: usize, const P: usize>(
 	games: usize,
 	seed: u64,
 	rules: &Rules<P>,
@@ -111,10 +116,12 @@ fn analyze<const N: usize, const P: usize>(
 	(0..games)
 		.into_par_iter()
 		.map(|game| {
-			let sites = gaussian_sites::<N>(&mut map_rng(seed, game));
-			let diagram = VoronoiDiagram::from_sites(sites);
-			let graph = diagram.cell_graph();
-			solve(&graph, rules)
+			let mut rng = map_rng(seed, game);
+			if N != M && rng.random::<bool>() {
+				solve_random_map::<M, P>(&mut rng, rules)
+			} else {
+				solve_random_map::<N, P>(&mut rng, rules)
+			}
 		})
 		.fold(
 			|| [Tally::default(); P],
@@ -139,13 +146,24 @@ fn analyze<const N: usize, const P: usize>(
 		)
 }
 
+
+
+fn solve_random_map<const N: usize, const P: usize>(
+	rng: &mut impl Rng, rules: &Rules<P>,
+) -> [Outcome; P] {
+	let sites = gaussian_sites::<N>(rng);
+	let diagram = VoronoiDiagram::from_sites(sites);
+	solve(&diagram.cell_graph(), rules)
+}
+
+
+
 fn game_progress(total: usize) -> impl Fn() + Sync {
 	let started = Instant::now();
 	let state = io::stderr().is_terminal().then(|| {
 		let _ = draw_game_progress(io::stderr().lock(), 0, total, Duration::ZERO);
 		Mutex::new((0_usize, started))
 	});
-
 	move || {
 		let Some(state) = &state else { return };
 		let mut state = state.lock().unwrap();
@@ -158,6 +176,8 @@ fn game_progress(total: usize) -> impl Fn() + Sync {
 		}
 	}
 }
+
+
 
 fn draw_game_progress(
 	mut out: impl Write,
@@ -188,6 +208,24 @@ fn draw_game_progress(
 	out.flush()
 }
 
+
+
+#[allow(dead_code, reason = "each build selects one point-count mode")]
+#[derive(Clone, Copy)]
+enum PointCount {
+	Fixed(usize),
+	FiftyFifty(usize, usize),
+}
+
+impl PointCount {
+	const fn sizes(self) -> [usize; 2] {
+		match self {
+			Self::Fixed(n) => [n, n],
+			Self::FiftyFifty(a, b) => [a, b],
+		}
+	}
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Outcome {
 	Loss,
@@ -206,6 +244,8 @@ const RULES: Rules<'static, NUM_PLAYERS> = Rules {
 	on_full_map: ON_FULL_MAP,
 	on_no_move: ON_NO_MOVE,
 };
+
+
 
 fn map_rng(seed: u64, game: usize) -> StdRng {
 	// Keep the experiment and map index in separate parts of the key so that
@@ -328,8 +368,96 @@ impl<const N: usize> VoronoiDiagram<N> {
 
 
 fn solve<const N: usize, const P: usize>(graph: &Graph<N>, rules: &Rules<P>) -> [Outcome; P] {
+	let palette = rules.palettes[0];
+	if P == 2
+		&& N <= 32
+		&& palette.len() <= 4
+		&& palette == rules.palettes[1]
+		&& rules.on_full_map == by_actor(Win, Loss)
+		&& rules.on_no_move == by_actor(Loss, Win)
+	{
+		let neighbors = graph.each_ref().map(|row| {
+			row.iter().fold(0u32, |bits, &i| bits | (1 << i))
+		});
+		let all_cells = ((1u64 << N) - 1) as u32;
+		let mut moves = [0; 4];
+		for (i, color) in palette.iter().enumerate() {
+			if !palette[..i].contains(color) {
+				moves[i] = all_cells;
+			}
+		}
+		let first_wins = shared_palette_win(moves, &neighbors, &mut HashMap::new());
+		let losing_player = if first_wins { 1 } else { 0 };
+		return rules.on_no_move[losing_player];
+	}
 	best_outcome(graph, rules, &mut [None; N], 0, &mut HashMap::new())
 }
+
+
+
+// In two-player normal play with a shared palette, the remaining legal cells
+// for each color determine every future move. Renaming colors preserves the winner.
+fn shared_palette_win(
+	mut moves: [u32; 4],
+	neighbors: &[u32],
+	memo: &mut HashMap<[u32; 4], bool>,
+) -> bool {
+	moves.sort_unstable();
+	let active = moves.iter().fold(0, |all, mask| all | mask);
+	if active == 0 {
+		return false;
+	}
+	if let Some(&win) = memo.get(&moves) {
+		return win;
+	}
+
+	let mut at_risk = 0;
+	for cell in cell_indices(active) {
+		let bit = 1u32 << cell;
+		let colors = moves.iter().filter(|&&mask| mask & bit != 0).count() as u32;
+		if colors <= (active & neighbors[cell]).count_ones() {
+			at_risk |= bit;
+		}
+	}
+	// A future neighbor move can remove at most one color. If every cell
+	// has more colors than remaining neighbors, all of them must be played.
+	if at_risk == 0 {
+		return active.count_ones() % 2 == 1;
+	}
+
+	for cell in cell_indices(at_risk).chain(cell_indices(active & !at_risk)) {
+		let bit = 1u32 << cell;
+		let remaining = moves.map(|mask| mask & !bit);
+		for color in 0..moves.len() {
+			if moves[color] & bit == 0 || (color > 0 && moves[color] == moves[color - 1]) {
+				continue;
+			}
+			let mut child = remaining;
+			child[color] &= !neighbors[cell];
+			if !shared_palette_win(child, neighbors, memo) {
+				memo.insert(moves, true);
+				return true;
+			}
+		}
+	}
+	memo.insert(moves, false);
+	false
+}
+
+
+
+fn cell_indices(mut mask: u32) -> impl Iterator<Item = usize> {
+	std::iter::from_fn(move || {
+		if mask == 0 {
+			return None;
+		}
+		let cell = mask.trailing_zeros() as usize;
+		mask &= mask - 1;
+		Some(cell)
+	})
+}
+
+
 
 // Each mover ranks Win > Draw > Loss for their own seat (max-n). This is
 // minimax for two players with opposing outcomes. Equal moves keep the first
@@ -373,6 +501,8 @@ fn best_outcome<const N: usize, const P: usize>(
 	memo.insert(*board, result);
 	result
 }
+
+
 
 // Each seat's counts are indexed by Outcome.
 type Tally = [usize; 3];
@@ -565,6 +695,36 @@ mod tests {
 	}
 
 	#[test]
+	fn shared_palette_search_agrees_with_full_minimax() {
+		let palettes: &[&[Colors]] = &[
+			&[Red], &[Red, Yellow], &[Red, Yellow, Green],
+			&[Red, Yellow, Green, Blue], &[Red, Red, Blue],
+		];
+		for game in 0..12 {
+			let sites = gaussian_sites::<8>(&mut map_rng(193, game));
+			let graph = VoronoiDiagram::from_sites(sites).cell_graph();
+			for &palette in palettes {
+				let seats = [palette, palette];
+				let rules = usual_rules(&seats);
+				let expected = best_outcome(&graph, &rules, &mut [None; 8], 0, &mut HashMap::new());
+				assert_eq!(solve(&graph, &rules), expected, "map {game}, palette {palette:?}");
+			}
+		}
+	}
+
+	#[test]
+	fn shared_palette_search_handles_the_highest_cell_bit() {
+		let rules = usual_rules(&[&[Red], &[Red]]);
+		let mut graph: Graph<32> = std::array::from_fn(|_| Vec::new());
+		for leaf in 0..31 {
+			graph[leaf].push(31);
+			graph[31].push(leaf);
+		}
+		// Coloring the center of the star blocks every leaf.
+		assert_eq!(solve(&graph, &rules), [Win, Loss]);
+	}
+
+	#[test]
 	fn cached_solver_matches_exhaustive_minimax_on_all_four_cell_graphs() {
 		let pairs = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
 		let shared = usual_rules(&[&[Red, Yellow, Green, Blue], &[Red, Yellow, Green, Blue]]);
@@ -589,13 +749,25 @@ mod tests {
 	}
 
 	#[test]
+	fn mixed_sizes_follow_the_seeded_coin() {
+		let rules = usual_rules(&[&[Red, Blue], &[Red, Blue]]);
+		// One cell always goes to player 1. With two cells and two colors,
+		// player 2 can always fill the last cell.
+		let two_cells = (0..100).filter(|&i| map_rng(79, i).random::<bool>()).count();
+		assert!((1..100).contains(&two_cells));
+		let totals = analyze::<1, 2, 2>(100, 79, &rules, || {});
+		assert_eq!(totals[0][Win as usize], 100 - two_cells);
+		assert_eq!(totals[1][Win as usize], two_cells);
+	}
+
+	#[test]
 	fn statistics_count_every_game_for_every_seat_including_an_immediate_block() {
 		use std::sync::atomic::{AtomicUsize, Ordering};
 
 		let mut rules = usual_rules(&[&[], &[Red], &[Blue]]);
 		rules.on_no_move[0] = [Loss, Draw, Win];
 		let finished = AtomicUsize::new(0);
-		let totals = analyze::<3, 3>(17, 7, &rules, || {
+		let totals = analyze::<3, 3, 3>(17, 7, &rules, || {
 			finished.fetch_add(1, Ordering::Relaxed);
 		});
 		assert_eq!(finished.into_inner(), 17);
